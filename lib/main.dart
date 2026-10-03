@@ -111,24 +111,43 @@ class DatabaseHelper {
     return await db.delete('inventory', where: 'id = ?', whereArgs: [id]);
   }
 
-  // --- POS & Sales Operations ---
-  Future<bool> processSale(int medicineId, String brandName, int qty, double unitPrice, double total) async {
+  // --- POS Batch Multi-Item Sales Operations ---
+  Future<bool> processMultiItemSale(List<Map<String, dynamic>> cartItems) async {
     final db = await instance.database;
-    final List<Map<String, dynamic>> res = await db.query('inventory', where: 'id = ?', whereArgs: [medicineId]);
-    if (res.isEmpty) return false;
+    
+    // Check stock for all items first
+    for (var item in cartItems) {
+      final res = await db.query('inventory', where: 'id = ?', whereArgs: [item['id']]);
+      if (res.isEmpty) return false;
+      int currentQty = res.first['quantity'] as int;
+      if (currentQty < (item['cartQty'] as int)) return false;
+    }
 
-    int currentQty = res.first['quantity'] as int;
-    if (currentQty < qty) return false;
+    // Perform atomic transaction
+    await db.transaction((txn) async {
+      String nowStr = DateTime.now().toIso8601String();
+      for (var item in cartItems) {
+        int medId = item['id'];
+        int qtySold = item['cartQty'];
+        double uPrice = (item['unitPrice'] as num).toDouble();
+        double total = uPrice * qtySold;
 
-    await db.update('inventory', {'quantity': currentQty - qty}, where: 'id = ?', whereArgs: [medicineId]);
+        // Deduct inventory
+        await txn.rawUpdate(
+          'UPDATE inventory SET quantity = quantity - ? WHERE id = ?',
+          [qtySold, medId],
+        );
 
-    await db.insert('sales', {
-      'medicineId': medicineId,
-      'brandName': brandName,
-      'quantitySold': qty,
-      'unitPrice': unitPrice,
-      'totalAmount': total,
-      'saleDate': DateTime.now().toIso8601String(),
+        // Record sale line
+        await txn.insert('sales', {
+          'medicineId': medId,
+          'brandName': item['brandName'],
+          'quantitySold': qtySold,
+          'unitPrice': uPrice,
+          'totalAmount': total,
+          'saleDate': nowStr,
+        });
+      }
     });
 
     return true;
@@ -468,7 +487,7 @@ class _InventoryTabState extends State<InventoryTab> {
 }
 
 // ==========================================
-// 4. POS BILLING TAB (WITH LIVE SEARCH)
+// 4. POS BILLING TAB (MULTI-ITEM CART)
 // ==========================================
 class POSBillingTab extends StatefulWidget {
   const POSBillingTab({super.key});
@@ -478,10 +497,8 @@ class POSBillingTab extends StatefulWidget {
 }
 
 class _POSBillingTabState extends State<POSBillingTab> {
-  List<Map<String, dynamic>> _medicines = [];
-  Map<String, dynamic>? _selectedMedicine;
-  final qtyController = TextEditingController(text: '1');
-  double _calculatedTotal = 0.0;
+  List<Map<String, dynamic>> _allMedicines = [];
+  final List<Map<String, dynamic>> _cart = [];
 
   @override
   void initState() {
@@ -492,17 +509,65 @@ class _POSBillingTabState extends State<POSBillingTab> {
   void _loadMedicines() async {
     final data = await DatabaseHelper.instance.getAllMedicines();
     setState(() {
-      _medicines = data;
+      _allMedicines = data;
     });
   }
 
-  void _calculateTotal() {
-    if (_selectedMedicine != null) {
-      int qty = int.tryParse(qtyController.text) ?? 1;
-      double price = (_selectedMedicine!['unitPrice'] as num).toDouble();
+  double get _grandTotal {
+    double total = 0.0;
+    for (var item in _cart) {
+      double price = (item['unitPrice'] as num).toDouble();
+      int qty = item['cartQty'] as int;
+      total += (price * qty);
+    }
+    return total;
+  }
+
+  void _addToCart(Map<String, dynamic> medicine) {
+    int existingIdx = _cart.indexWhere((element) => element['id'] == medicine['id']);
+    if (existingIdx != -1) {
+      int currentCartQty = _cart[existingIdx]['cartQty'];
+      if (currentCartQty < medicine['quantity']) {
+        setState(() {
+          _cart[existingIdx]['cartQty'] += 1;
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Cannot add more than available stock!')),
+        );
+      }
+    } else {
+      if (medicine['quantity'] > 0) {
+        setState(() {
+          Map<String, dynamic> newItem = Map.from(medicine);
+          newItem['cartQty'] = 1;
+          _cart.add(newItem);
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Medicine is out of stock!')),
+        );
+      }
+    }
+  }
+
+  void _updateCartQty(int index, int delta) {
+    int currentQty = _cart[index]['cartQty'];
+    int stockQty = _cart[index]['quantity'];
+    int newQty = currentQty + delta;
+
+    if (newQty <= 0) {
       setState(() {
-        _calculatedTotal = price * qty;
+        _cart.removeAt(index);
       });
+    } else if (newQty <= stockQty) {
+      setState(() {
+        _cart[index]['cartQty'] = newQty;
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Maximum available stock reached!')),
+      );
     }
   }
 
@@ -513,14 +578,14 @@ class _POSBillingTabState extends State<POSBillingTab> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
-            final filtered = _medicines.where((med) {
+            final filtered = _allMedicines.where((med) {
               final brand = med['brandName'].toString().toLowerCase();
               final generic = med['genericName'].toString().toLowerCase();
               return brand.contains(searchKeyword.toLowerCase()) || generic.contains(searchKeyword.toLowerCase());
             }).toList();
 
             return AlertDialog(
-              title: const Text('Select Medicine'),
+              title: const Text('Add Items to Cart'),
               content: SizedBox(
                 width: double.maxFinite,
                 child: Column(
@@ -529,7 +594,7 @@ class _POSBillingTabState extends State<POSBillingTab> {
                     TextField(
                       autofocus: true,
                       decoration: const InputDecoration(
-                        hintText: 'Type brand or generic name...',
+                        hintText: 'Search by brand or generic...',
                         prefixIcon: Icon(Icons.search),
                         border: OutlineInputBorder(),
                       ),
@@ -550,15 +615,15 @@ class _POSBillingTabState extends State<POSBillingTab> {
                                 final med = filtered[idx];
                                 return ListTile(
                                   title: Text(med['brandName'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                                  subtitle: Text('${med['genericName']} | Rs. ${med['unitPrice']}'),
-                                  trailing: Text('Stock: ${med['quantity']}'),
-                                  onTap: () {
-                                    setState(() {
-                                      _selectedMedicine = med;
-                                      _calculateTotal();
-                                    });
-                                    Navigator.pop(context);
-                                  },
+                                  subtitle: Text('${med['genericName']} | Unit: Rs. ${med['unitPrice']}'),
+                                  trailing: ElevatedButton(
+                                    style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+                                    onPressed: () {
+                                      _addToCart(med);
+                                      Navigator.pop(context);
+                                    },
+                                    child: const Text('Add', style: TextStyle(color: Colors.white)),
+                                  ),
                                 );
                               },
                             ),
@@ -569,7 +634,7 @@ class _POSBillingTabState extends State<POSBillingTab> {
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context),
-                  child: const Text('Cancel'),
+                  child: const Text('Done'),
                 ),
               ],
             );
@@ -581,128 +646,131 @@ class _POSBillingTabState extends State<POSBillingTab> {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    return Scaffold(
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text('Point of Sale Counter', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.teal)),
-          const SizedBox(height: 16),
-          
-          InkWell(
-            onTap: _openSearchDialog,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.teal),
-                borderRadius: BorderRadius.circular(8),
-                color: Colors.white,
+          Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.teal,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Text(
-                      _selectedMedicine != null
-                          ? '${_selectedMedicine!['brandName']} (${_selectedMedicine!['genericName']})'
-                          : 'Tap to Search & Select Medicine...',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: _selectedMedicine != null ? FontWeight.bold : FontWeight.normal,
-                        color: _selectedMedicine != null ? Colors.black87 : Colors.grey.shade600,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const Icon(Icons.search, color: Colors.teal),
-                ],
-              ),
+              icon: const Icon(Icons.add_shopping_cart, color: Colors.white),
+              label: const Text('Search & Add Items to Bill', style: TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.bold)),
+              onPressed: _openSearchDialog,
             ),
           ),
-
-          if (_selectedMedicine != null) ...[
-            const SizedBox(height: 12),
-            Card(
-              color: Colors.teal.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+          
+          Expanded(
+            child: _cart.isEmpty
+                ? const Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Text('Selected: ${_selectedMedicine!['brandName']}', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        Text('Unit Price: Rs. ${_selectedMedicine!['unitPrice']}'),
+                        Icon(Icons.shopping_cart_outlined, size: 64, color: Colors.grey),
+                        SizedBox(height: 8),
+                        Text('No medicines added to bill yet.', style: TextStyle(color: Colors.grey, fontSize: 16)),
                       ],
                     ),
-                    Text('Available Stock: ${_selectedMedicine!['quantity']}', style: const TextStyle(color: Colors.teal, fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-          ],
+                  )
+                : ListView.builder(
+                    itemCount: _cart.length,
+                    itemBuilder: (ctx, idx) {
+                      final item = _cart[idx];
+                      double unitPrice = (item['unitPrice'] as num).toDouble();
+                      int cartQty = item['cartQty'];
+                      double lineTotal = unitPrice * cartQty;
 
-          const SizedBox(height: 16),
-          TextField(
-            controller: qtyController,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'Quantity to Dispense', border: OutlineInputBorder()),
-            onChanged: (_) => _calculateTotal(),
+                      return Card(
+                        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(item['brandName'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                    Text('Rs. $unitPrice each | Stock: ${item['quantity']}'),
+                                  ],
+                                ),
+                              ),
+                              Row(
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.remove_circle_outline, color: Colors.red),
+                                    onPressed: () => _updateCartQty(idx, -1),
+                                  ),
+                                  Text('$cartQty', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                                  IconButton(
+                                    icon: const Icon(Icons.add_circle_outline, color: Colors.teal),
+                                    onPressed: () => _updateCartQty(idx, 1),
+                                  ),
+                                ],
+                              ),
+                              SizedBox(
+                                width: 70,
+                                child: Text(
+                                  'Rs. ${lineTotal.toStringAsFixed(0)}',
+                                  textAlign: TextAlign.end,
+                                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.teal),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
           ),
-          const SizedBox(height: 20),
+
           Card(
-            elevation: 2,
+            margin: const EdgeInsets.all(12),
+            elevation: 3,
             child: Padding(
               padding: const EdgeInsets.all(16.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              child: Column(
                 children: [
-                  const Text('Total Payable:', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                  Text('Rs. ${_calculatedTotal.toStringAsFixed(2)}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.teal)),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Total Bill Amount:', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      Text('Rs. ${_grandTotal.toStringAsFixed(2)}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.teal)),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal,
+                      minimumSize: const Size.fromHeight(50),
+                    ),
+                    onPressed: _cart.isEmpty
+                        ? null
+                        : () async {
+                            bool success = await DatabaseHelper.instance.processMultiItemSale(_cart);
+                            if (success) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Multi-item sale completed & stock updated!')),
+                              );
+                              setState(() {
+                                _cart.clear();
+                              });
+                              _loadMedicines();
+                            } else {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Error processing sale! Check stock availability.'), backgroundColor: Colors.red),
+                              );
+                            }
+                          },
+                    child: const Text('Complete Sale', style: TextStyle(fontSize: 18, color: Colors.white, fontWeight: FontWeight.bold)),
+                  ),
                 ],
               ),
             ),
-          ),
-          const SizedBox(height: 24),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.teal,
-              minimumSize: const Size.fromHeight(50),
-            ),
-            onPressed: () async {
-              if (_selectedMedicine == null) {
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a medicine first!')));
-                return;
-              }
-              int qty = int.tryParse(qtyController.text) ?? 1;
-              double uPrice = (_selectedMedicine!['unitPrice'] as num).toDouble();
-
-              bool success = await DatabaseHelper.instance.processSale(
-                _selectedMedicine!['id'],
-                _selectedMedicine!['brandName'],
-                qty,
-                uPrice,
-                _calculatedTotal,
-              );
-
-              if (success) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Sale completed & stock updated!')),
-                );
-                setState(() {
-                  _selectedMedicine = null;
-                  qtyController.text = '1';
-                  _calculatedTotal = 0.0;
-                });
-                _loadMedicines();
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Error: Not enough stock available!'), backgroundColor: Colors.red),
-                );
-              }
-            },
-            child: const Text('Complete Sale', style: TextStyle(fontSize: 18, color: Colors.white)),
           ),
         ],
       ),
