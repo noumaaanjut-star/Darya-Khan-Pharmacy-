@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
@@ -5,6 +6,9 @@ import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:googleapis/drive/v3.dart' as drive;
+import 'package:http/http.dart' as http;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -33,6 +37,79 @@ class JugnooPharmacyApp extends StatelessWidget {
       ),
       home: const MainDashboardScreen(),
     );
+  }
+}
+
+// ==========================================
+// GOOGLE DRIVE SYNC SERVICE
+// ==========================================
+class GoogleDriveService {
+  static final GoogleDriveService instance = GoogleDriveService._init();
+  GoogleDriveService._init();
+
+  final GoogleSignIn _googleSignIn = GoogleSignIn(
+    scopes: [drive.DriveApi.driveAppdataScope],
+  );
+
+  GoogleSignInAccount? currentUser;
+
+  Future<bool> signIn() async {
+    try {
+      currentUser = await _googleSignIn.signIn();
+      return currentUser != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> syncDatabaseToDriveSilently(String dbPath) async {
+    try {
+      currentUser ??= await _googleSignIn.signInSilently();
+      if (currentUser == null) return;
+
+      final authHeaders = await currentUser!.authHeaders;
+      final authenticateClient = GoogleAuthClient(authHeaders);
+      final driveApi = drive.DriveApi(authenticateClient);
+
+      File dbFile = File(dbPath);
+      if (!await dbFile.exists()) return;
+
+      var media = drive.Media(dbFile.openRead(), dbFile.lengthSync());
+
+      // Look for existing backup file in appDataFolder
+      var fileList = await driveApi.files.list(
+        q: "name = 'jugnoo_medical_center.db' and 'appDataFolder' in parents",
+        spaces: 'appDataFolder',
+      );
+
+      if (fileList.files != null && fileList.files!.isNotEmpty) {
+        // Update existing cloud file
+        String fileId = fileList.files!.first.id!;
+        var driveFile = drive.File();
+        await driveApi.files.update(driveFile, fileId, uploadMedia: media);
+      } else {
+        // Upload new file
+        var driveFile = drive.File()
+          ..name = 'jugnoo_medical_center.db'
+          ..parents = ['appDataFolder'];
+        await driveApi.files.create(driveFile, uploadMedia: media);
+      }
+    } catch (_) {
+      // Offline or sync failure handled gracefully without interrupting user
+    }
+  }
+}
+
+class GoogleAuthClient extends http.BaseClient {
+  final Map<String, String> _headers;
+  final http.Client _client = http.Client();
+
+  GoogleAuthClient(this._headers);
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    request.headers.addAll(_headers);
+    return _client.send(request);
   }
 }
 
@@ -97,10 +174,11 @@ class DatabaseHelper {
     ''');
   }
 
-  // --- Inventory Operations ---
   Future<int> addMedicine(Map<String, dynamic> row) async {
     final db = await instance.database;
-    return await db.insert('inventory', row);
+    int id = await db.insert('inventory', row);
+    _triggerDriveSync();
+    return id;
   }
 
   Future<List<Map<String, dynamic>>> getAllMedicines() async {
@@ -110,19 +188,14 @@ class DatabaseHelper {
 
   Future<int> updateMedicine(int id, Map<String, dynamic> row) async {
     final db = await instance.database;
-    return await db.update('inventory', row, where: 'id = ?', whereArgs: [id]);
+    int count = await db.update('inventory', row, where: 'id = ?', whereArgs: [id]);
+    _triggerDriveSync();
+    return count;
   }
 
-  Future<int> deleteMedicine(int id) async {
-    final db = await instance.database;
-    return await db.delete('inventory', where: 'id = ?', whereArgs: [id]);
-  }
-
-  // --- POS Batch Multi-Item Sales Operations ---
   Future<bool> processMultiItemSale(List<Map<String, dynamic>> cartItems) async {
     final db = await instance.database;
     
-    // Check stock for all items
     for (var item in cartItems) {
       final res = await db.query('inventory', where: 'id = ?', whereArgs: [item['id']]);
       if (res.isEmpty) return false;
@@ -132,7 +205,6 @@ class DatabaseHelper {
 
     int newInvoiceId = DateTime.now().millisecondsSinceEpoch;
 
-    // Perform atomic transaction
     await db.transaction((txn) async {
       String nowStr = DateTime.now().toIso8601String();
       for (var item in cartItems) {
@@ -141,13 +213,11 @@ class DatabaseHelper {
         double uPrice = (item['unitPrice'] as num).toDouble();
         double total = uPrice * qtySold;
 
-        // Deduct stock
         await txn.rawUpdate(
           'UPDATE inventory SET quantity = quantity - ? WHERE id = ?',
           [qtySold, medId],
         );
 
-        // Record line item with invoice grouping key
         await txn.insert('sales', {
           'invoiceId': newInvoiceId,
           'medicineId': medId,
@@ -160,7 +230,14 @@ class DatabaseHelper {
       }
     });
 
+    _triggerDriveSync();
     return true;
+  }
+
+  void _triggerDriveSync() async {
+    final dbPath = await getDatabasesPath();
+    final fullPath = p.join(dbPath, 'jugnoo_medical_center.db');
+    GoogleDriveService.instance.syncDatabaseToDriveSilently(fullPath);
   }
 
   Future<List<Map<String, dynamic>>> getDetailedSales(DateTime date, {bool isMonthly = false}) async {
@@ -208,6 +285,22 @@ class _MainDashboardScreenState extends State<MainDashboardScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('JUGNOO MEDICAL & DENTAL CENTRE'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.cloud_sync),
+            tooltip: 'Google Drive Account',
+            onPressed: () async {
+              bool success = await GoogleDriveService.instance.signIn();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(success ? 'Google Drive Connected for Auto-Sync!' : 'Google Drive Sign-In Failed/Cancelled'),
+                  ),
+                );
+              }
+            },
+          ),
+        ],
       ),
       body: _pages[_currentIndex],
       bottomNavigationBar: BottomNavigationBar(
@@ -636,7 +729,6 @@ class _POSBillingTabState extends State<POSBillingTab> {
               pw.SizedBox(height: 12),
               pw.Divider(thickness: 0.5),
               
-              // --- FOOTER ADDRESS & CONTACT ---
               pw.Center(
                 child: pw.Text('Phone: 0325-1723777', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8)),
               ),
@@ -865,7 +957,6 @@ class _POSBillingTabState extends State<POSBillingTab> {
                                       const SnackBar(content: Text('Sale completed & stock updated!')),
                                     );
                                     
-                                    // Trigger Print After Completion
                                     await _printReceipt(printCopy, printTotal);
 
                                     setState(() {
@@ -1012,7 +1103,6 @@ class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProv
           child: TabBarView(
             controller: _tabController,
             children: [
-              // --- TAB 1: TODAY'S INVOICE GROUPS ---
               Column(
                 children: [
                   Container(
@@ -1089,7 +1179,6 @@ class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProv
                 ],
               ),
 
-              // --- TAB 2: MONTHLY ITEM AGGREGATION ---
               Column(
                 children: [
                   Container(
