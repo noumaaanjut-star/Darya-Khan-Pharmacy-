@@ -11,7 +11,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Initialize Firebase (using default options from google-services.json)
   try {
     await Firebase.initializeApp();
     FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: true);
@@ -114,7 +113,6 @@ class DatabaseHelper {
     final db = await instance.database;
     int id = await db.insert('inventory', row);
 
-    // Background Firestore Sync
     try {
       _firestore.collection('inventory').doc(id.toString()).set({
         ...row,
@@ -135,7 +133,6 @@ class DatabaseHelper {
     final db = await instance.database;
     int count = await db.update('inventory', row, where: 'id = ?', whereArgs: [id]);
 
-    // Background Firestore Sync
     try {
       _firestore.collection('inventory').doc(id.toString()).set({
         ...row,
@@ -188,14 +185,12 @@ class DatabaseHelper {
         saleRecord['saleId'] = saleId;
         syncItems.add(saleRecord);
 
-        // Update local stock in firestore
         _firestore.collection('inventory').doc(medId.toString()).update({
           'quantity': FieldValue.increment(-qtySold),
         });
       }
     });
 
-    // Background Push Batch Sale to Firestore
     try {
       WriteBatch batch = _firestore.batch();
       for (var sale in syncItems) {
