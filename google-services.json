@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "890721928620",
+    "project_id": "jugnoo-medical-centre",
+    "storage_bucket": "jugnoo-medical-centre.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:890721928620:android:1c54498a115eef3b952609",
+        "android_client_info": {
+          "package_name": "com.clinic.jugnoo_medical"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD76vOC47PBJ0J38gQaSDlsp0KfiPDRVbQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
