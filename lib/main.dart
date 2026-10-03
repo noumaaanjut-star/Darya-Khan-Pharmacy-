@@ -392,7 +392,7 @@ class _InventoryTabState extends State<InventoryTab> {
                                 '${item['quantity']} in stock',
                                 style: TextStyle(
                                   fontWeight: FontWeight.bold,
-                                  color: lowStock ? Colors.red : Colors.black80,
+                                  color: lowStock ? Colors.red : Colors.black87,
                                 ),
                               ),
                               const SizedBox(height: 4),
