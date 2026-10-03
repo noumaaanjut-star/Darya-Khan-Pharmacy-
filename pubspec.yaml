@@ -1,6 +1,7 @@
-name: darya_khan_pharmacy
-description: "Inventory and Sales Management App for Darya Khan Pharmacy"
+name: jugnoo_medical_center
+description: A new Flutter project for Jugnoo Medical & Dental Centre.
 publish_to: 'none'
+
 version: 1.0.0+1
 
 environment:
@@ -9,23 +10,17 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  cupertino_icons: ^1.0.6
   sqflite: ^2.3.0
   path: ^1.8.3
   intl: ^0.19.0
   pdf: ^3.10.8
   printing: ^5.13.1
-  
-  flutter:
-    sdk: flutter
-  sqflite: ^2.3.0
-  path: ^1.9.0
-  intl: ^0.19.0
-  cupertino_icons: ^1.0.8
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^4.0.0
+  flutter_lints: ^3.0.0
 
 flutter:
   uses-material-design: true
