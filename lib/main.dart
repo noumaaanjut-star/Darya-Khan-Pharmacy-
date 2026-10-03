@@ -54,11 +54,14 @@ class DatabaseHelper {
 
     return await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: _createDB,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
           await db.execute('ALTER TABLE sales ADD COLUMN unitPrice REAL DEFAULT 0.0');
+        }
+        if (oldVersion < 3) {
+          await db.execute('ALTER TABLE sales ADD COLUMN invoiceId INTEGER DEFAULT 0');
         }
       },
     );
@@ -80,6 +83,7 @@ class DatabaseHelper {
     await db.execute('''
       CREATE TABLE sales (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoiceId INTEGER NOT NULL,
         medicineId INTEGER NOT NULL,
         brandName TEXT NOT NULL,
         quantitySold INTEGER NOT NULL,
@@ -115,13 +119,15 @@ class DatabaseHelper {
   Future<bool> processMultiItemSale(List<Map<String, dynamic>> cartItems) async {
     final db = await instance.database;
     
-    // Check stock for all items first
+    // Check stock for all items
     for (var item in cartItems) {
       final res = await db.query('inventory', where: 'id = ?', whereArgs: [item['id']]);
       if (res.isEmpty) return false;
       int currentQty = res.first['quantity'] as int;
       if (currentQty < (item['cartQty'] as int)) return false;
     }
+
+    int newInvoiceId = DateTime.now().millisecondsSinceEpoch;
 
     // Perform atomic transaction
     await db.transaction((txn) async {
@@ -132,14 +138,15 @@ class DatabaseHelper {
         double uPrice = (item['unitPrice'] as num).toDouble();
         double total = uPrice * qtySold;
 
-        // Deduct inventory
+        // Deduct stock
         await txn.rawUpdate(
           'UPDATE inventory SET quantity = quantity - ? WHERE id = ?',
           [qtySold, medId],
         );
 
-        // Record sale line
+        // Record line item with invoice grouping key
         await txn.insert('sales', {
+          'invoiceId': newInvoiceId,
           'medicineId': medId,
           'brandName': item['brandName'],
           'quantitySold': qtySold,
@@ -779,7 +786,7 @@ class _POSBillingTabState extends State<POSBillingTab> {
 }
 
 // ==========================================
-// 5. DETAILED SALES REPORTS TAB
+// 5. GROUPED & ITEMIZED SALES REPORTS TAB
 // ==========================================
 class SalesReportsTab extends StatefulWidget {
   const SalesReportsTab({super.key});
@@ -790,10 +797,8 @@ class SalesReportsTab extends StatefulWidget {
 
 class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  List<Map<String, dynamic>> _dailySalesList = [];
-  List<Map<String, dynamic>> _monthlySalesList = [];
-  double _dailyTotal = 0.0;
-  double _monthlyTotal = 0.0;
+  List<Map<String, dynamic>> _rawDailySales = [];
+  List<Map<String, dynamic>> _rawMonthlySales = [];
 
   @override
   void initState() {
@@ -804,68 +809,87 @@ class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProv
 
   void _loadSalesData() async {
     DateTime now = DateTime.now();
-
     final dailyData = await DatabaseHelper.instance.getDetailedSales(now, isMonthly: false);
     final monthlyData = await DatabaseHelper.instance.getDetailedSales(now, isMonthly: true);
 
-    double dTotal = dailyData.fold(0.0, (sum, item) => sum + (item['totalAmount'] as num).toDouble());
-    double mTotal = monthlyData.fold(0.0, (sum, item) => sum + (item['totalAmount'] as num).toDouble());
-
     setState(() {
-      _dailySalesList = dailyData;
-      _monthlySalesList = monthlyData;
-      _dailyTotal = dTotal;
-      _monthlyTotal = mTotal;
+      _rawDailySales = dailyData;
+      _rawMonthlySales = monthlyData;
     });
   }
 
-  Widget _buildSalesListView(List<Map<String, dynamic>> salesList, double grandTotal) {
-    return Column(
-      children: [
-        Container(
-          width: double.infinity,
-          color: Colors.teal.shade50,
-          padding: const EdgeInsets.all(12),
-          child: Text(
-            'Total Revenue: Rs. ${grandTotal.toStringAsFixed(2)}',
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.teal),
-          ),
-        ),
-        Expanded(
-          child: salesList.isEmpty
-              ? const Center(child: Text('No transaction history found.'))
-              : ListView.builder(
-                  itemCount: salesList.length,
-                  itemBuilder: (ctx, idx) {
-                    final item = salesList[idx];
-                    DateTime dt = DateTime.parse(item['saleDate']);
-                    String formattedTime = DateFormat('hh:mm a - dd MMM').format(dt);
+  // --- Group Daily Sales by Invoice ID ---
+  List<Map<String, dynamic>> _groupDailyByInvoice(List<Map<String, dynamic>> raw) {
+    Map<String, List<Map<String, dynamic>>> grouped = {};
+    for (var row in raw) {
+      String key = row['invoiceId'] != null && row['invoiceId'] != 0
+          ? row['invoiceId'].toString()
+          : row['saleDate'].toString();
+      if (!grouped.containsKey(key)) {
+        grouped[key] = [];
+      }
+      grouped[key]!.add(row);
+    }
 
-                    return Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      child: ListTile(
-                        leading: CircleAvatar(
-                          backgroundColor: Colors.teal,
-                          child: Text('${item['quantitySold']}x', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                        ),
-                        title: Text(item['brandName'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                        subtitle: Text('Rate: Rs. ${item['unitPrice'] ?? 0} | $formattedTime'),
-                        trailing: Text(
-                          'Rs. ${(item['totalAmount'] as num).toStringAsFixed(2)}',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.teal),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-        ),
-      ],
-    );
+    List<Map<String, dynamic>> invoices = [];
+    grouped.forEach((key, items) {
+      double total = items.fold(0.0, (sum, i) => sum + (i['totalAmount'] as num).toDouble());
+      DateTime dt = DateTime.parse(items.first['saleDate']);
+      invoices.add({
+        'invoiceId': key,
+        'date': dt,
+        'totalAmount': total,
+        'items': items,
+      });
+    });
+
+    invoices.sort((a, b) => (b['date'] as DateTime).compareTo(a['date'] as DateTime));
+    return invoices;
+  }
+
+  // --- Group Monthly Sales Date-Wise by Medicine ---
+  List<Map<String, dynamic>> _groupMonthlyByItemDate(List<Map<String, dynamic>> raw) {
+    Map<String, Map<String, dynamic>> aggregated = {};
+
+    for (var row in raw) {
+      DateTime dt = DateTime.parse(row['saleDate']);
+      String dateKey = DateFormat('MMM dd, yyyy').format(dt);
+      String brand = row['brandName'];
+      String compositeKey = '$dateKey|$brand';
+
+      if (!aggregated.containsKey(compositeKey)) {
+        aggregated[compositeKey] = {
+          'dateStr': dateKey,
+          'brandName': brand,
+          'totalQty': 0,
+          'totalAmount': 0.0,
+          'unitPrice': (row['unitPrice'] as num).toDouble(),
+          'rawDate': dt,
+        };
+      }
+
+      aggregated[compositeKey]!['totalQty'] = (aggregated[compositeKey]!['totalQty'] as int) + (row['quantitySold'] as int);
+      aggregated[compositeKey]!['totalAmount'] = (aggregated[compositeKey]!['totalAmount'] as double) + ((row['totalAmount'] as num).toDouble());
+    }
+
+    List<Map<String, dynamic>> result = aggregated.values.toList();
+    result.sort((a, b) {
+      int dateComp = (b['rawDate'] as DateTime).compareTo(a['rawDate'] as DateTime);
+      if (dateComp != 0) return dateComp;
+      return (a['brandName'] as String).compareTo(b['brandName'] as String);
+    });
+
+    return result;
   }
 
   @override
   Widget build(BuildContext context) {
+    double dailyTotal = _rawDailySales.fold(0.0, (sum, i) => sum + (i['totalAmount'] as num).toDouble());
+    double monthlyTotal = _rawMonthlySales.fold(0.0, (sum, i) => sum + (i['totalAmount'] as num).toDouble());
+
+    List<Map<String, dynamic>> groupedInvoices = _groupDailyByInvoice(_rawDailySales);
+    List<Map<String, dynamic>> aggregatedMonthly = _groupMonthlyByItemDate(_rawMonthlySales);
+
     return Column(
       children: [
         TabBar(
@@ -874,7 +898,7 @@ class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProv
           unselectedLabelColor: Colors.grey,
           indicatorColor: Colors.teal,
           tabs: const [
-            Tab(icon: Icon(Icons.today), text: 'Today\'s Breakdown'),
+            Tab(icon: Icon(Icons.receipt_long), text: 'Today\'s Sales'),
             Tab(icon: Icon(Icons.calendar_month), text: 'Monthly History'),
           ],
         ),
@@ -882,8 +906,129 @@ class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProv
           child: TabBarView(
             controller: _tabController,
             children: [
-              _buildSalesListView(_dailySalesList, _dailyTotal),
-              _buildSalesListView(_monthlySalesList, _monthlyTotal),
+              // --- TAB 1: TODAY'S INVOICE GROUPS ---
+              Column(
+                children: [
+                  Container(
+                    width: double.infinity,
+                    color: Colors.teal.shade50,
+                    padding: const EdgeInsets.all(12),
+                    child: Text(
+                      'Today\'s Total Revenue: Rs. ${dailyTotal.toStringAsFixed(2)}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.teal),
+                    ),
+                  ),
+                  Expanded(
+                    child: groupedInvoices.isEmpty
+                        ? const Center(child: Text('No sales recorded today.'))
+                        : ListView.builder(
+                            itemCount: groupedInvoices.length,
+                            itemBuilder: (ctx, idx) {
+                              final inv = groupedInvoices[idx];
+                              DateTime dt = inv['date'];
+                              String timeStr = DateFormat('hh:mm a').format(dt);
+                              List items = inv['items'];
+
+                              return Card(
+                                margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                elevation: 2,
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12.0),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              const Icon(Icons.receipt, color: Colors.teal, size: 20),
+                                              const SizedBox(width: 6),
+                                              Text(
+                                                'Sale at $timeStr',
+                                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                              ),
+                                            ],
+                                          ),
+                                          Text(
+                                            'Rs. ${(inv['totalAmount'] as double).toStringAsFixed(2)}',
+                                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.teal),
+                                          ),
+                                        ],
+                                      ),
+                                      const Divider(),
+                                      ...items.map<Widget>((item) {
+                                        return Padding(
+                                          padding: const EdgeInsets.symmetric(vertical: 2.0),
+                                          child: Row(
+                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Text(
+                                                '• ${item['quantitySold']}x  ${item['brandName']}',
+                                                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                                              ),
+                                              Text('Rs. ${(item['totalAmount'] as num).toStringAsFixed(2)}'),
+                                            ],
+                                          ),
+                                        );
+                                      }).toList(),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+
+              // --- TAB 2: MONTHLY ITEM AGGREGATION ---
+              Column(
+                children: [
+                  Container(
+                    width: double.infinity,
+                    color: Colors.teal.shade50,
+                    padding: const EdgeInsets.all(12),
+                    child: Text(
+                      'Monthly Revenue: Rs. ${monthlyTotal.toStringAsFixed(2)}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.teal),
+                    ),
+                  ),
+                  Expanded(
+                    child: aggregatedMonthly.isEmpty
+                        ? const Center(child: Text('No monthly sales recorded.'))
+                        : ListView.builder(
+                            itemCount: aggregatedMonthly.length,
+                            itemBuilder: (ctx, idx) {
+                              final row = aggregatedMonthly[idx];
+                              return Card(
+                                margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                child: ListTile(
+                                  leading: CircleAvatar(
+                                    backgroundColor: Colors.teal,
+                                    child: Text(
+                                      '${row['totalQty']}x',
+                                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                  title: Text(
+                                    row['brandName'],
+                                    style: const TextStyle(fontWeight: FontWeight.bold),
+                                  ),
+                                  subtitle: Text('Sold on ${row['dateStr']}'),
+                                  trailing: Text(
+                                    'Rs. ${(row['totalAmount'] as double).toStringAsFixed(2)}',
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.teal),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
