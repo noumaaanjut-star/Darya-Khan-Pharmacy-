@@ -591,7 +591,7 @@ class _POSBillingTabState extends State<POSBillingTab> {
         margin: const pw.EdgeInsets.all(10),
         build: (pw.Context context) {
           return pw.Column(
-            cross: pw.CrossAxisAlignment.start,
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
               pw.Center(
                 child: pw.Text(
