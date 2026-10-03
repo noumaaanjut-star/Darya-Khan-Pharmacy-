@@ -2,20 +2,23 @@ import 'package:flutter/material.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:intl/intl.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await DatabaseHelper.instance.database;
-  runApp(const DaryaKhanPharmacyApp());
+  runApp(const JugnooPharmacyApp());
 }
 
-class DaryaKhanPharmacyApp extends StatelessWidget {
-  const DaryaKhanPharmacyApp({super.key});
+class JugnooPharmacyApp extends StatelessWidget {
+  const JugnooPharmacyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Darya Khan Pharmacy',
+      title: 'JUGNOO MEDICAL & DENTAL CENTRE',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primarySwatch: Colors.teal,
@@ -44,7 +47,7 @@ class DatabaseHelper {
 
   Future<Database> get database async {
     if (_database != null) return _database!;
-    _database = await _initDB('darya_khan_pharmacy.db');
+    _database = await _initDB('jugnoo_medical_center.db');
     return _database!;
   }
 
@@ -204,7 +207,7 @@ class _MainDashboardScreenState extends State<MainDashboardScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Darya Khan Pharmacy'),
+        title: const Text('JUGNOO MEDICAL & DENTAL CENTRE'),
       ),
       body: _pages[_currentIndex],
       bottomNavigationBar: BottomNavigationBar(
@@ -494,7 +497,7 @@ class _InventoryTabState extends State<InventoryTab> {
 }
 
 // ==========================================
-// 4. POS BILLING TAB (MULTI-ITEM CART)
+// 4. POS BILLING TAB & PRINTING HELPERS
 // ==========================================
 class POSBillingTab extends StatefulWidget {
   const POSBillingTab({super.key});
@@ -576,6 +579,86 @@ class _POSBillingTabState extends State<POSBillingTab> {
         const SnackBar(content: Text('Maximum available stock reached!')),
       );
     }
+  }
+
+  Future<void> _printReceipt(List<Map<String, dynamic>> items, double total) async {
+    final pdf = pw.Document();
+    final dateStr = DateFormat('dd-MMM-yyyy hh:mm a').format(DateTime.now());
+
+    pdf.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.roll80,
+        margin: const pw.EdgeInsets.all(10),
+        build: (pw.Context context) {
+          return pw.Column(
+            cross: pw.CrossAxisAlignment.start,
+            children: [
+              pw.Center(
+                child: pw.Text(
+                  'JUGNOO MEDICAL & DENTAL CENTRE',
+                  textAlign: pw.TextAlign.center,
+                  style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 13),
+                ),
+              ),
+              pw.SizedBox(height: 4),
+              pw.Center(
+                child: pw.Text('POS Receipt | $dateStr', style: const pw.TextStyle(fontSize: 8)),
+              ),
+              pw.Divider(thickness: 0.8),
+              pw.SizedBox(height: 4),
+              
+              ...items.map((item) {
+                double uPrice = (item['unitPrice'] as num).toDouble();
+                int qty = item['cartQty'] ?? item['quantitySold'] ?? 1;
+                double lTotal = uPrice * qty;
+                return pw.Padding(
+                  padding: const pw.EdgeInsets.symmetric(vertical: 2),
+                  child: pw.Row(
+                    mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                    children: [
+                      pw.Expanded(
+                        child: pw.Text('${item['brandName']} (${qty}x)', style: const pw.TextStyle(fontSize: 9)),
+                      ),
+                      pw.Text('Rs. ${lTotal.toStringAsFixed(0)}', style: const pw.TextStyle(fontSize: 9)),
+                    ],
+                  ),
+                );
+              }).toList(),
+
+              pw.Divider(thickness: 0.8),
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text('Total Payable:', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11)),
+                  pw.Text('Rs. ${total.toStringAsFixed(2)}', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 11)),
+                ],
+              ),
+              pw.SizedBox(height: 12),
+              pw.Divider(thickness: 0.5),
+              
+              // --- FOOTER ADDRESS & CONTACT ---
+              pw.Center(
+                child: pw.Text('Phone: 0325-1723777', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 8)),
+              ),
+              pw.SizedBox(height: 2),
+              pw.Center(
+                child: pw.Text(
+                  'Address: 01, Main Ghazi Road, ALLA\' ABAD, WESTRIDGE 3',
+                  textAlign: pw.TextAlign.center,
+                  style: const pw.TextStyle(fontSize: 7),
+                ),
+              ),
+              pw.SizedBox(height: 4),
+              pw.Center(
+                child: pw.Text('Get Well Soon!', style: pw.TextStyle(fontStyle: pw.FontStyle.italic, fontSize: 8)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    await Printing.layoutPdf(onLayout: (PdfPageFormat format) async => pdf.save());
   }
 
   void _openSearchDialog() {
@@ -750,30 +833,55 @@ class _POSBillingTabState extends State<POSBillingTab> {
                     ],
                   ),
                   const SizedBox(height: 12),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.teal,
-                      minimumSize: const Size.fromHeight(50),
-                    ),
-                    onPressed: _cart.isEmpty
-                        ? null
-                        : () async {
-                            bool success = await DatabaseHelper.instance.processMultiItemSale(_cart);
-                            if (success) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Multi-item sale completed & stock updated!')),
-                              );
-                              setState(() {
-                                _cart.clear();
-                              });
-                              _loadMedicines();
-                            } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Error processing sale! Check stock availability.'), backgroundColor: Colors.red),
-                              );
-                            }
-                          },
-                    child: const Text('Complete Sale', style: TextStyle(fontSize: 18, color: Colors.white, fontWeight: FontWeight.bold)),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(50),
+                            side: const BorderSide(color: Colors.teal, width: 1.5),
+                          ),
+                          icon: const Icon(Icons.print, color: Colors.teal),
+                          label: const Text('Print Receipt', style: TextStyle(fontSize: 16, color: Colors.teal, fontWeight: FontWeight.bold)),
+                          onPressed: _cart.isEmpty ? null : () => _printReceipt(List.from(_cart), _grandTotal),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.teal,
+                            minimumSize: const Size.fromHeight(50),
+                          ),
+                          onPressed: _cart.isEmpty
+                              ? null
+                              : () async {
+                                  List<Map<String, dynamic>> printCopy = List.from(_cart);
+                                  double printTotal = _grandTotal;
+
+                                  bool success = await DatabaseHelper.instance.processMultiItemSale(_cart);
+                                  if (success) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Sale completed & stock updated!')),
+                                    );
+                                    
+                                    // Trigger Print After Completion
+                                    await _printReceipt(printCopy, printTotal);
+
+                                    setState(() {
+                                      _cart.clear();
+                                    });
+                                    _loadMedicines();
+                                  } else {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Error processing sale! Check stock.'), backgroundColor: Colors.red),
+                                    );
+                                  }
+                                },
+                          child: const Text('Complete Sale', style: TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -818,7 +926,6 @@ class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProv
     });
   }
 
-  // --- Group Daily Sales by Invoice ID ---
   List<Map<String, dynamic>> _groupDailyByInvoice(List<Map<String, dynamic>> raw) {
     Map<String, List<Map<String, dynamic>>> grouped = {};
     for (var row in raw) {
@@ -847,7 +954,6 @@ class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProv
     return invoices;
   }
 
-  // --- Group Monthly Sales Date-Wise by Medicine ---
   List<Map<String, dynamic>> _groupMonthlyByItemDate(List<Map<String, dynamic>> raw) {
     Map<String, Map<String, dynamic>> aggregated = {};
 
