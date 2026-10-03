@@ -11,13 +11,21 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
+  // Safe Firebase Initialization with Timeout to prevent splash screen freezes
   try {
-    await Firebase.initializeApp();
+    await Firebase.initializeApp().timeout(
+      const Duration(milliseconds: 1500),
+      onTimeout: () {
+        debugPrint('Firebase initialization timed out. Proceeding offline.');
+        return Firebase.app();
+      },
+    );
     FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: true);
   } catch (e) {
-    debugPrint('Firebase init error: $e');
+    debugPrint('Firebase init bypassed: $e');
   }
 
+  // Always load SQLite Database
   await DatabaseHelper.instance.database;
   runApp(const JugnooPharmacyApp());
 }
@@ -52,7 +60,6 @@ class JugnooPharmacyApp extends StatelessWidget {
 class DatabaseHelper {
   static final DatabaseHelper instance = DatabaseHelper._init();
   static Database? _database;
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   DatabaseHelper._init();
 
@@ -114,7 +121,7 @@ class DatabaseHelper {
     int id = await db.insert('inventory', row);
 
     try {
-      _firestore.collection('inventory').doc(id.toString()).set({
+      FirebaseFirestore.instance.collection('inventory').doc(id.toString()).set({
         ...row,
         'localId': id,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -134,7 +141,7 @@ class DatabaseHelper {
     int count = await db.update('inventory', row, where: 'id = ?', whereArgs: [id]);
 
     try {
-      _firestore.collection('inventory').doc(id.toString()).set({
+      FirebaseFirestore.instance.collection('inventory').doc(id.toString()).set({
         ...row,
         'localId': id,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -185,16 +192,18 @@ class DatabaseHelper {
         saleRecord['saleId'] = saleId;
         syncItems.add(saleRecord);
 
-        _firestore.collection('inventory').doc(medId.toString()).update({
-          'quantity': FieldValue.increment(-qtySold),
-        });
+        try {
+          FirebaseFirestore.instance.collection('inventory').doc(medId.toString()).update({
+            'quantity': FieldValue.increment(-qtySold),
+          });
+        } catch (_) {}
       }
     });
 
     try {
-      WriteBatch batch = _firestore.batch();
+      WriteBatch batch = FirebaseFirestore.instance.batch();
       for (var sale in syncItems) {
-        DocumentReference ref = _firestore.collection('sales').doc(sale['saleId'].toString());
+        DocumentReference ref = FirebaseFirestore.instance.collection('sales').doc(sale['saleId'].toString());
         batch.set(ref, sale);
       }
       batch.commit();
