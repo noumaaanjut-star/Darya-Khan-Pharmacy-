@@ -1,4 +1,3 @@
-
 name: Build Android APK
 
 on:
@@ -15,6 +14,9 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+
+      - name: Re-create Android Project Files
+        run: flutter create . --platforms=android
 
       - name: Get Dependencies
         run: flutter pub get
