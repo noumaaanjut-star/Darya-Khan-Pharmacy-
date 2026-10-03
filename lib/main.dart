@@ -717,117 +717,109 @@ class SalesReportsTab extends StatefulWidget {
   const SalesReportsTab({super.key});
 
   @override
-  State<SalesReportsTab> createState() => _Here is the complete `lib/main.dart` code updated with the keyboard padding fix. Replacing your entire `lib/main.dart` file with this code will ensure the entire **Add/Edit Medicine** form shifts above the soft keyboard so all input fields and the **Save Stock** button remain visible while typing.
-
-```dart
-import 'package:flutter/material.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart' as p;
-import 'package:intl/intl.dart';
-
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await DatabaseHelper.instance.database;
-  runApp(const DaryaKhanPharmacyApp());
+  State<SalesReportsTab> createState() => _SalesReportsTabState();
 }
 
-class DaryaKhanPharmacyApp extends StatelessWidget {
-  const DaryaKhanPharmacyApp({super.key});
+class _SalesReportsTabState extends State<SalesReportsTab> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  List<Map<String, dynamic>> _dailySalesList = [];
+  List<Map<String, dynamic>> _monthlySalesList = [];
+  double _dailyTotal = 0.0;
+  double _monthlyTotal = 0.0;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+    _loadSalesData();
+  }
+
+  void _loadSalesData() async {
+    DateTime now = DateTime.now();
+
+    final dailyData = await DatabaseHelper.instance.getDetailedSales(now, isMonthly: false);
+    final monthlyData = await DatabaseHelper.instance.getDetailedSales(now, isMonthly: true);
+
+    double dTotal = dailyData.fold(0.0, (sum, item) => sum + (item['totalAmount'] as num).toDouble());
+    double mTotal = monthlyData.fold(0.0, (sum, item) => sum + (item['totalAmount'] as num).toDouble());
+
+    setState(() {
+      _dailySalesList = dailyData;
+      _monthlySalesList = monthlyData;
+      _dailyTotal = dTotal;
+      _monthlyTotal = mTotal;
+    });
+  }
+
+  Widget _buildSalesListView(List<Map<String, dynamic>> salesList, double grandTotal) {
+    return Column(
+      children: [
+        Container(
+          width: double.infinity,
+          color: Colors.teal.shade50,
+          padding: const EdgeInsets.all(12),
+          child: Text(
+            'Total Revenue: Rs. ${grandTotal.toStringAsFixed(2)}',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.teal),
+          ),
+        ),
+        Expanded(
+          child: salesList.isEmpty
+              ? const Center(child: Text('No transaction history found.'))
+              : ListView.builder(
+                  itemCount: salesList.length,
+                  itemBuilder: (ctx, idx) {
+                    final item = salesList[idx];
+                    DateTime dt = DateTime.parse(item['saleDate']);
+                    String formattedTime = DateFormat('hh:mm a - dd MMM').format(dt);
+
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.teal,
+                          child: Text('${item['quantitySold']}x', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                        ),
+                        title: Text(item['brandName'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                        subtitle: Text('Rate: Rs. ${item['unitPrice'] ?? 0} | $formattedTime'),
+                        trailing: Text(
+                          'Rs. ${(item['totalAmount'] as num).toStringAsFixed(2)}',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.teal),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Darya Khan Pharmacy',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        primarySwatch: Colors.teal,
-        useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFFF6F8FA),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.teal,
-          foregroundColor: Colors.white,
-          centerTitle: true,
-          elevation: 2,
+    return Column(
+      children: [
+        TabBar(
+          controller: _tabController,
+          labelColor: Colors.teal,
+          unselectedLabelColor: Colors.grey,
+          indicatorColor: Colors.teal,
+          tabs: const [
+            Tab(icon: Icon(Icons.today), text: 'Today\'s Breakdown'),
+            Tab(icon: Icon(Icons.calendar_month), text: 'Monthly History'),
+          ],
         ),
-      ),
-      home: const MainDashboardScreen(),
+        Expanded(
+          child: TabBarView(
+            controller: _tabController,
+            children: [
+              _buildSalesListView(_dailySalesList, _dailyTotal),
+              _buildSalesListView(_monthlySalesList, _monthlyTotal),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
-
-// ==========================================
-// 1. LOCAL DATABASE HELPER (SQLite)
-// ==========================================
-class DatabaseHelper {
-  static final DatabaseHelper instance = DatabaseHelper._init();
-  static Database? _database;
-
-  DatabaseHelper._init();
-
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    _database = await _initDB('darya_khan_pharmacy.db');
-    return _database!;
-  }
-
-  Future<Database> _initDB(String filePath) async {
-    final dbPath = await getDatabasesPath();
-    final path = p.join(dbPath, filePath);
-
-    return await openDatabase(
-      path,
-      version: 2,
-      onCreate: _createDB,
-      onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2) {
-          await db.execute('ALTER TABLE sales ADD COLUMN unitPrice REAL DEFAULT 0.0');
-        }
-      },
-    );
-  }
-
-  Future _createDB(Database db, int version) async {
-    await db.execute('''
-      CREATE TABLE inventory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        brandName TEXT NOT NULL,
-        genericName TEXT NOT NULL,
-        unitPrice REAL NOT NULL,
-        packPrice REAL NOT NULL,
-        expiryDate TEXT NOT NULL,
-        quantity INTEGER NOT NULL
-      )
-    ''');
-
-    await db.execute('''
-      CREATE TABLE sales (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        medicineId INTEGER NOT NULL,
-        brandName TEXT NOT NULL,
-        quantitySold INTEGER NOT NULL,
-        unitPrice REAL NOT NULL,
-        totalAmount REAL NOT NULL,
-        saleDate TEXT NOT NULL
-      )
-    ''');
-  }
-
-  // --- Inventory Operations ---
-  Future<int> addMedicine(Map<String, dynamic> row) async {
-    final db = await instance.database;
-    return await db.insert('inventory', row);
-  }
-
-  Future<List<Map<String, dynamic>>> getAllMedicines() async {
-    final db = await instance.database;
-    return await db.query('inventory', orderBy: 'brandName ASC');
-  }
-
-  Future<int> updateMedicine(int id, Map<String, dynamic> row) async {
-    final db = await instance.database;
-    return await db.update('inventory', row, where: 'id = ?', whereArgs: [id]);
-  }
-
-  Future<int> deleteMedicine(int id) async {
-    final db = await instance.database;
-    return await db.delete('inventory', where: 'id = ?',
